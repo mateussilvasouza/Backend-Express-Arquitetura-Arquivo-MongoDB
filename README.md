@@ -2,6 +2,13 @@
 
 API de gestão de matrículas e bolsas educacionais utilizando Node.js, Express e MongoDB.
 
+<!-- Ajuste o slug do repositório se o remote mudar. -->
+[![CI](https://github.com/mateussilvasouza/Backend-Express-Arquitetura-Arquivo-MongoDB/actions/workflows/ci.yml/badge.svg)](https://github.com/mateussilvasouza/Backend-Express-Arquitetura-Arquivo-MongoDB/actions/workflows/ci.yml)
+
+> **Nota da entrega:** a pasta [`specs/`](specs/) faz parte da solução e foi mantida no repositório
+> de propósito — ela mostra o método de trabalho (Spec Driven Development assistido por IA) usado
+> antes de escrever código. Ver [Método de trabalho](#método-de-trabalho-sdd-assistido-por-ia).
+
 ## Objetivo
 
 Este desafio avalia principalmente como você:
@@ -278,6 +285,22 @@ Um teste concorrente provando que a capacidade não é ultrapassada é um difere
 
 Durante o live coding, não é esperado escrever essa suíte completa. Um único teste relevante, ou uma boa explicação da estratégia, já fornece sinal.
 
+## Integração contínua
+
+O workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda a suíte a cada `push` (qualquer branch)
+e em cada `pull_request`.
+
+| Item | Detalhe |
+|---|---|
+| Runner | `ubuntu-22.04` (libssl compatível com o binário do MongoDB 7.0.14) |
+| Matriz | Node `20.x`, `22.x`, `24.x` (`fail-fast: false`) — cobre o range de `engines` do `package.json` |
+| Passos | `npm ci` → `npm run test:coverage` |
+| Cache | dependências npm (`actions/setup-node`) e binário do `mongodb-memory-server` (`~/.cache/mongodb-binaries`) |
+| Artefato | relatório de cobertura publicado na leg Node `24.x` |
+
+Os testes usam MongoDB em memória, então o job **não** precisa de serviço de banco nem de Docker.
+O badge de status está no topo deste README — atualize o slug do repositório se o remote mudar.
+
 ## Critérios de avaliação
 
 ### Live coding
@@ -295,10 +318,95 @@ A quantidade de código concluída possui peso baixo.
 
 ## Documentação das decisões
 
-Adicione ao README uma seção curta explicando:
+### Método de trabalho (SDD assistido por IA)
 
-1. como organizou as responsabilidades e por quê;
-2. como protegeu a capacidade contra requisições concorrentes;
-3. como evitou matrículas ativas duplicadas;
-4. limitações e trade-offs conhecidos;
-5. o que faria diferente em um ambiente de produção.
+A pasta [`specs/`](specs/) foi versionada de propósito, para deixar visível **como conduzi o trabalho com IA**.
+Antes de escrever código, transformei o enunciado em especificação executável e revisei cada documento:
+
+| Documento | Papel |
+|---|---|
+| [`specs/01-stack.md`](specs/01-stack.md) | stack, convenções, nomenclatura (o que atravessa o HTTP segue o enunciado; o resto é inglês) |
+| [`specs/02-spec.md`](specs/02-spec.md) | contrato HTTP, regras por endpoint, **8 invariantes testáveis**, matriz de códigos de erro |
+| [`specs/03-plan.md`](specs/03-plan.md) | arquitetura em camadas, modelo de dados, **estratégia de concorrência com pseudocódigo** |
+| [`specs/04-tasks.md`](specs/04-tasks.md) | backlog em 7 fases com critério de aceite e rastreio invariante → teste |
+| [`specs/05-tests.md`](specs/05-tests.md) | pirâmide de testes, helpers/factories, tabela de casos por arquivo |
+
+Fluxo: **spec → plano → tasks → testes**, decisões ambíguas resolvidas explicitamente antes da implementação
+(camadas, envelope de erro, semântica do `cancel` idempotente), e **um commit por fase** — o histórico do
+Git mostra a progressão `baseline → fundação → domínio → students → enrollments → cancel → concorrência → docs`.
+A IA foi usada para acelerar spec, boilerplate e testes; a revisão de regras, invariantes e trade-offs foi minha.
+
+### 1. Organização das responsabilidades
+
+`route → controller → service → repository → model`, mais dois módulos de apoio:
+
+| Camada | Responsabilidade | Não faz |
+|---|---|---|
+| `routes/` | montar Router, aplicar `validate(schema)` | regra de negócio |
+| `controllers/` | traduzir HTTP ↔ domínio, status e envelope | decisão de regra |
+| `services/` | regras, invariantes, orquestração; lança `AppError` | conhecer `req`/`res` |
+| `repositories/` | única camada que fala Mongoose (inclui os updates atômicos) | lançar `AppError` |
+| `models/` | schema + índices | — |
+| `domain/` | `scholarship` e `age` — funções puras, testadas isoladas | I/O |
+| `validation/` | schemas zod na borda; `assertObjectId` → `400 INVALID_OBJECT_ID` | — |
+
+Por quê: o desafio é pequeno, mas as regras de concorrência viram queries condicionais específicas
+(`claimSeat`, `releaseSeat`, `cancelIfActive`, `promoteFirstInQueue`) — concentrá-las em repositórios
+nomeados mantém o service legível e os pontos críticos localizados. Regras puras (bolsa, idade) ficam
+fora do banco para teste unitário direto. Erros de domínio passam por `AppError` e um `errorHandler`
+único os converte no envelope `{ error: { code, message, details? } }`.
+
+### 2. Proteção da capacidade sob concorrência
+
+Nenhum `ler → decidir em JS → escrever`. A vaga é alocada por **um único update condicional atômico**:
+
+```js
+Course.findOneAndUpdate(
+  { _id, status: 'ABERTO', $expr: { $lt: ['$vagasOcupadas', '$capacidadeVagas'] } },
+  { $inc: { vagasOcupadas: 1 } },
+  { new: true }
+)
+```
+
+O MongoDB serializa escritas no mesmo documento e reavalia o filtro no instante da escrita
+(`filter` + `$inc` = compare-and-swap). Com `N` requisições e `K` vagas, apenas `K` updates
+satisfazem o `$expr`; os demais recebem `null` e viram `FILA_ESPERA` sem tocar o contador.
+`releaseSeat` usa a guarda `vagasOcupadas > 0` para nunca ficar negativo.
+Prova: `tests/integration/concurrency.test.js` (capacidade `K`, `N` `POST` simultâneos → exatamente `K` confirmadas).
+
+### 3. Prevenção de matrícula ativa duplicada
+
+Duas defesas; a segunda é a garantia real:
+
+1. leitura `existsActive(alunoId, cursoId)` no service → `409` limpo no caso comum;
+2. **índice único parcial** `{ alunoId, cursoId }` com `partialFilterExpression: { status: { $in: ['CONFIRMADA','FILA_ESPERA'] } }`.
+   Em corrida, um insert vence e o outro recebe `E11000`, traduzido para `409 DUPLICATE_ACTIVE_ENROLLMENT`
+   (com compensação do `claimSeat` já aplicado). `CANCELADA` fica fora do índice → nova matrícula após cancelamento é permitida.
+
+O cancelamento é idempotente pela **porta única** `cancelIfActive` (`findOneAndUpdate` com `status $in` ativos):
+só o request que efetiva a transição `ativa → CANCELADA` produz efeito; repetições/concorrência recebem `null`.
+A promoção da fila (`findOneAndUpdate` com `status: 'FILA_ESPERA'`, ordem `createdAt` asc / `_id` asc)
+garante que dois cancelamentos concorrentes nunca promovam a mesma pessoa.
+
+**Decisão:** `PATCH /enrollments/:id/cancel` numa matrícula **já `CANCELADA`** responde **`200 OK`** com o
+estado atual e **sem novos efeitos** (idempotente para retries de cliente).
+
+### 4. Limitações e trade-offs
+
+- **Sem transação multi-documento** entre `claimSeat` + `create` e entre `cancelIfActive` + `promote`/`release`.
+  Uma queda de processo entre os passos pode divergir `vagasOcupadas` da contagem de confirmadas.
+  Mitigação atual: passos idempotentes + compensação no `E11000`.
+- `mongodb-memory-server` roda **standalone** → transações não seriam testáveis mesmo se adicionadas.
+- Testes de concorrência usam `Promise.all` no mesmo processo/conexão: **aproximam**, não reproduzem concorrência distribuída.
+- Sem `Idempotency-Key`: um retry de `POST /enrollments` que já criou não é deduplicado (a menos que caia na regra de duplicidade ativa).
+- CPF sem validação de dígito verificador (fora do escopo do desafio).
+- `existsActive` + índice: o custo da corrida é uma exceção `E11000` traduzida.
+
+### 5. O que faria diferente em produção
+
+- Envolver `claimSeat`+`create` e o cancelamento em **transação** (replica set), ou um job de reconciliação `vagasOcupadas` ↔ confirmadas.
+- `Idempotency-Key` em `POST /enrollments` e no `cancel`.
+- CORS restrito por origem (hoje `cors()` liberado) e `helmet()` com configuração explícita; hoje só `app.disable('x-powered-by')`.
+- Rate limiting, limite de corpo em `express.json({ limit })`, logs estruturados e observabilidade.
+- Paginação em `GET /students` e `GET /enrollments`.
+- Promoção da fila disparando notificação ao aluno.

@@ -1,6 +1,6 @@
 require('dotenv').config();
-const mongoose = require('mongoose');
 const app = require('./app');
+const { connect } = require('./config/database');
 
 const PORT = process.env.PORT || 3333;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27028/desafio_senior';
@@ -8,7 +8,7 @@ const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27028/desafio_se
 async function bootstrap() {
   try {
     console.log('Conectando ao MongoDB...');
-    await mongoose.connect(MONGO_URI);
+    await connect(MONGO_URI);
     console.log('✅ MongoDB conectado com sucesso');
 
     app.listen(PORT, () => {

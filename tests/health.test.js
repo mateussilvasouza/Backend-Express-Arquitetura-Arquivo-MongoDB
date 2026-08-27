@@ -26,7 +26,7 @@ describe('GET /health', () => {
     const response = await request(app).get('/rota-inexistente');
 
     expect(response.status).toBe(404);
-    expect(response.body).toHaveProperty('error', 'Rota não encontrada');
+    expect(response.body.error).toMatchObject({ code: 'NOT_FOUND' });
   });
 });
 

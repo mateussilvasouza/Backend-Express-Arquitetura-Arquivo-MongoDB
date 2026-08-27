@@ -13,6 +13,13 @@ async function connectTestDatabase() {
   await mongoose.connect(mongoServer.getUri());
 }
 
+// Garante que os índices declarados nos schemas existam (o clear só faz deleteMany,
+// não recria índices; testes de unicidade / matrícula ativa dependem deles).
+async function syncIndexes() {
+  const models = mongoose.modelNames().map((name) => mongoose.model(name));
+  await Promise.all(models.map((model) => model.syncIndexes()));
+}
+
 async function clearTestDatabase() {
   if (mongoose.connection.readyState !== 1) return;
 
@@ -34,5 +41,6 @@ async function disconnectTestDatabase() {
 module.exports = {
   connectTestDatabase,
   clearTestDatabase,
-  disconnectTestDatabase
+  disconnectTestDatabase,
+  syncIndexes
 };

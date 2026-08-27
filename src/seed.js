@@ -1,5 +1,5 @@
 require('dotenv').config();
-const mongoose = require('mongoose');
+const { connect, disconnect } = require('./config/database');
 const Course = require('./models/Course');
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27028/desafio_senior';
@@ -37,7 +37,7 @@ const initialCourses = [
 async function seed() {
   try {
     console.log('Conectando ao MongoDB para executar seed...');
-    await mongoose.connect(MONGO_URI);
+    await connect(MONGO_URI);
 
     await Course.init();
 
@@ -66,7 +66,7 @@ async function seed() {
     console.error('❌ Erro ao executar seed:', error);
     process.exitCode = 1;
   } finally {
-    await mongoose.disconnect();
+    await disconnect();
   }
 }
 
